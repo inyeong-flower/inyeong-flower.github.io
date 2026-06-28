@@ -1,9 +1,10 @@
 // 오프라인 캐시 (꽃시장 현장에서 인터넷이 약해도 동작)
-const CACHE = 'gf-maeip-v4';
+const CACHE = 'gf-maeip-v5';
 const ASSETS = [
   './',
   './index.html',
   './manifest.webmanifest',
+  './favicon.svg',
   './icon-192.png',
   './icon-512.png'
 ];
