@@ -166,6 +166,22 @@
   }
   .toast.show{opacity:1;transform:translateX(-50%) translateY(0);}
   datalist{display:none;}
+
+  /* login overlay */
+  .login-overlay{position:fixed;inset:0;z-index:100;background:var(--green);
+    display:none;align-items:center;justify-content:center;padding:24px;}
+  .login-overlay.show{display:flex;}
+  .login-box{background:#fff;border-radius:22px;padding:30px 24px;max-width:360px;width:100%;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.25);}
+  .login-box h2{margin:8px 0 6px;color:var(--green);font-size:20px;}
+  .login-box p{color:var(--muted);font-size:14px;line-height:1.5;margin:0 0 18px;}
+  .login-box input{margin-bottom:12px;text-align:center;font-size:18px;letter-spacing:1px;}
+  .login-err{color:var(--rose);font-size:13px;font-weight:600;min-height:18px;margin-bottom:8px;}
+  .login-box .small{font-size:12px;color:var(--muted);margin-top:14px;}
+  /* sync badge */
+  #syncBadge{position:fixed;left:50%;top:calc(8px + env(safe-area-inset-top));transform:translateX(-50%);
+    z-index:40;background:rgba(0,0,0,.7);color:#fff;font-size:11px;font-weight:600;
+    padding:4px 12px;border-radius:999px;opacity:0;transition:.3s;pointer-events:none;}
+  #syncBadge.show{opacity:1;}
 </style>
 </head>
 <body>
@@ -271,6 +287,8 @@
     <div style="height:10px"></div>
     <label class="btn secondary" style="display:block;text-align:center" for="importFile">📥 백업 파일 복구</label>
     <input type="file" id="importFile" accept="application/json" style="display:none" />
+    <div style="height:18px"></div>
+    <button class="btn ghost" id="logoutBtn">이 기기 연동 해제 (로그아웃)</button>
   </section>
 
 </main>
@@ -333,14 +351,53 @@
 </div>
 
 <div class="toast" id="toast"></div>
+<div id="syncBadge"></div>
+
+<!-- 로그인 (연동 암호) 화면 -->
+<div class="login-overlay show" id="loginOverlay">
+  <div class="login-box">
+    <div style="font-size:42px">🌷</div>
+    <h2>꽃집 매입장부</h2>
+    <p id="loginMsg">이 기기를 처음 연결합니다.<br>연동 암호를 입력하세요.<br>(한 번만 입력하면 계속 유지됩니다)</p>
+    <input id="loginPw" type="password" inputmode="text" placeholder="연동 암호" autocomplete="current-password" />
+    <div class="login-err" id="loginErr"></div>
+    <button class="btn" id="loginBtn">연결하기</button>
+    <div class="small">암호는 사장님·와이프만 알면 됩니다.</div>
+  </div>
+</div>
+
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore-compat.js"></script>
 
 <script>
-/* ============================ 저장소 ============================ */
-const KEY_V='gf_vendors', KEY_P='gf_purchases';
-function load(k,d){try{return JSON.parse(localStorage.getItem(k))??d}catch(e){return d}}
-function persist(){localStorage.setItem(KEY_V,JSON.stringify(vendors));localStorage.setItem(KEY_P,JSON.stringify(purchases));}
-let vendors = load(KEY_V,[]);      // {code,name,bizno,memo}
-let purchases = load(KEY_P,[]);    // {id,code,date:'YYYY-MM-DD',amount}
+/* ============================ 클라우드 저장소 (Firebase) ============================ */
+const firebaseConfig = {
+  apiKey: "AIzaSyC9yVGIrSsiCVY1c193iFUMKEWZwkwuuio",
+  authDomain: "inyeong-flower.firebaseapp.com",
+  projectId: "inyeong-flower",
+  storageBucket: "inyeong-flower.firebasestorage.app",
+  messagingSenderId: "262335999287",
+  appId: "1:262335999287:web:1f6ac74cb04f296b637eb2"
+};
+const FIXED_EMAIL = "inyeong@flower.app";   // 로그인용 고정 식별자 (와이프는 암호만 입력)
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.firestore();
+db.enablePersistence({synchronizeTabs:true}).catch(()=>{});   // 오프라인에서도 동작
+const VCOL = () => db.collection('vendors');
+const PCOL = () => db.collection('purchases');
+
+let vendors = [];      // {code,name,bizno,memo}
+let purchases = [];    // {id,code,date:'YYYY-MM-DD',amount}
+let unsubV=null, unsubP=null;
+
+function syncBadge(msg){
+  const b=document.getElementById('syncBadge'); if(!b)return;
+  if(!msg){b.classList.remove('show');return;}
+  b.textContent=msg; b.classList.add('show');
+  clearTimeout(b._t); b._t=setTimeout(()=>b.classList.remove('show'),1500);
+}
 
 /* ============================ 유틸 ============================ */
 const won = n => '₩'+Number(n||0).toLocaleString('ko-KR');
@@ -481,16 +538,16 @@ document.getElementById('saveBtn').onclick=()=>{
     if(!code||code<1||code>9999){toast('업체번호는 1~9999');inVno.focus();return;}
     if(vendorByCode(code)){toast(code+'번은 이미 사용 중입니다');return;}
     if(!name){toast('업체명을 입력하세요');inVname.focus();return;}
-    v={code,name,bizno:'',memo:''};vendors.push(v);
+    v={code,name,bizno:'',memo:''};
+    VCOL().doc(String(code)).set(v);            // 새 거래처 → 클라우드 등록
   }
   const date=inDate.value||todayStr();
-  purchases.push({id:Date.now()+'-'+Math.random().toString(36).slice(2,6),code:v.code,date,amount});
-  persist();
+  PCOL().add({code:v.code,date,amount,createdAt:Date.now()});   // 매입 → 클라우드 (목록은 실시간 자동 갱신)
   toast('저장됐어요 · '+v.name+' '+won(amount));
   // reset for next quick entry
   inVendor.value='';inAmount.value='';document.getElementById('amount-preview').textContent='';
   newBox.style.display='none';inVno.value='';inVname.value='';
-  updateVendorUI();refreshVendorDatalist();updateTodayCount();
+  updateVendorUI();
   inVendor.focus();
 };
 
@@ -507,7 +564,7 @@ function updateTodayCount(){
       <button class="hist-del" data-tdel="${p.id}">삭제</button></div>`;}).join('');
   box.querySelectorAll('[data-tdel]').forEach(b=>b.onclick=()=>{
     if(!confirm('이 영수증을 삭제할까요?'))return;
-    purchases=purchases.filter(x=>x.id!==b.dataset.tdel);persist();updateTodayCount();
+    PCOL().doc(b.dataset.tdel).delete();
   });
 }
 
@@ -533,7 +590,7 @@ function renderHistory(){
   }).join('');
   box.querySelectorAll('[data-del]').forEach(b=>b.onclick=()=>{
     if(!confirm('이 영수증을 삭제할까요?'))return;
-    purchases=purchases.filter(x=>x.id!==b.dataset.del);persist();renderHistory();updateTodayCount();
+    PCOL().doc(b.dataset.del).delete();
   });
 }
 
@@ -611,11 +668,12 @@ function renderVmTotal(){
   document.getElementById('vm-count').textContent=periodLabel('vm')+' · 영수증 '+list.length+'건';
 }
 document.getElementById('vm-save').onclick=()=>{
-  currentVendor.name=document.getElementById('vm-edit-name').value.trim()||currentVendor.name;
-  currentVendor.bizno=document.getElementById('vm-edit-bizno').value.trim();
-  currentVendor.memo=document.getElementById('vm-edit-memo').value.trim();
-  persist();document.getElementById('vm-name').textContent=currentVendor.name;
-  refreshVendorDatalist();toast('저장됐어요');
+  const name=document.getElementById('vm-edit-name').value.trim()||currentVendor.name;
+  const bizno=document.getElementById('vm-edit-bizno').value.trim();
+  const memo=document.getElementById('vm-edit-memo').value.trim();
+  VCOL().doc(String(currentVendor.code)).set({code:currentVendor.code,name,bizno,memo});
+  document.getElementById('vm-name').textContent=name;
+  toast('저장됐어요');
 };
 
 /* ============================ 세금계산서 이미지 ============================ */
@@ -712,17 +770,31 @@ document.getElementById('exportBtn').onclick=()=>{
   a.href=URL.createObjectURL(new Blob([data],{type:'application/json'}));a.click();
   toast('백업 파일을 저장했어요');
 };
+async function commitOps(ops){   // 500개 한도 → 400개씩 나눠 커밋
+  for(let i=0;i<ops.length;i+=400){
+    const batch=db.batch();
+    ops.slice(i,i+400).forEach(fn=>fn(batch));
+    await batch.commit();
+  }
+}
 document.getElementById('importFile').onchange=e=>{
   const f=e.target.files[0];if(!f)return;
   const rd=new FileReader();
-  rd.onload=()=>{
+  rd.onload=async ()=>{
     try{
       const d=JSON.parse(rd.result);
       if(!Array.isArray(d.vendors)||!Array.isArray(d.purchases))throw 0;
-      if(!confirm('복구하면 현재 데이터를 덮어씁니다. 진행할까요?'))return;
-      vendors=d.vendors;purchases=d.purchases;persist();
-      refreshVendorDatalist();renderAll();toast('복구 완료');
-    }catch(err){toast('올바른 백업 파일이 아닙니다');}
+      if(!confirm('복구하면 클라우드의 현재 데이터를 덮어씁니다. 진행할까요?'))return;
+      toast('복구 중...');
+      const ev=await VCOL().get(), ep=await PCOL().get();
+      const ops=[];
+      ev.docs.forEach(doc=>ops.push(b=>b.delete(doc.ref)));
+      ep.docs.forEach(doc=>ops.push(b=>b.delete(doc.ref)));
+      d.vendors.forEach(v=>ops.push(b=>b.set(VCOL().doc(String(v.code)),{code:Number(v.code),name:v.name||'',bizno:v.bizno||'',memo:v.memo||''})));
+      d.purchases.forEach(p=>ops.push(b=>b.set(PCOL().doc(),{code:Number(p.code),date:p.date,amount:Number(p.amount),createdAt:Date.now()})));
+      await commitOps(ops);
+      toast('복구 완료');
+    }catch(err){toast('복구 실패 · 올바른 백업 파일인지 확인하세요');}
   };
   rd.readAsText(f);e.target.value='';
 };
@@ -759,11 +831,86 @@ document.querySelectorAll('[data-close]').forEach(el=>el.onclick=()=>el.closest(
 });
 
 /* ============================ 초기화 ============================ */
-function renderAll(){renderHistory();renderDash();renderVendors();updateTodayCount();}
+function renderAll(){renderHistory();renderDash();renderVendors();updateTodayCount();if(currentVendor&&document.getElementById('venModal').classList.contains('show'))renderVmTotal();}
+
+// 실시간 동기화 리스너 — 어느 기기에서 입력/삭제해도 자동 반영
+function startListeners(){
+  if(unsubV||unsubP)return;
+  unsubV=VCOL().onSnapshot(s=>{
+    vendors=s.docs.map(d=>d.data());
+    if(currentVendor){const f=vendorByCode(currentVendor.code);if(f)currentVendor=f;}
+    refreshVendorDatalist();renderAll();
+    if(!s.metadata.hasPendingWrites)syncBadge('☁ 동기화됨');
+  },err=>console.warn('vendors',err));
+  unsubP=PCOL().onSnapshot(s=>{
+    purchases=s.docs.map(d=>({id:d.id,...d.data()}));
+    renderAll();
+    if(!s.metadata.hasPendingWrites)syncBadge('☁ 동기화됨');
+  },err=>console.warn('purchases',err));
+}
+function stopListeners(){if(unsubV){unsubV();unsubV=null;}if(unsubP){unsubP();unsubP=null;}vendors=[];purchases=[];renderAll();}
+
+// 기존 기기 저장(localStorage) 데이터를 최초 1회 클라우드로 이전
+async function migrateIfNeeded(){
+  try{
+    if(localStorage.getItem('gf_migrated'))return;
+    const lv=JSON.parse(localStorage.getItem('gf_vendors')||'[]');
+    const lp=JSON.parse(localStorage.getItem('gf_purchases')||'[]');
+    if(!lv.length&&!lp.length){localStorage.setItem('gf_migrated','1');return;}
+    const vs=await VCOL().limit(1).get(), ps=await PCOL().limit(1).get();
+    if(!vs.empty||!ps.empty){localStorage.setItem('gf_migrated','1');return;}  // 클라우드에 이미 데이터 있음
+    const ops=[];
+    lv.forEach(v=>ops.push(b=>b.set(VCOL().doc(String(v.code)),{code:Number(v.code),name:v.name||'',bizno:v.bizno||'',memo:v.memo||''})));
+    lp.forEach(p=>ops.push(b=>b.set(PCOL().doc(),{code:Number(p.code),date:p.date,amount:Number(p.amount),createdAt:Date.now()})));
+    await commitOps(ops);
+    localStorage.setItem('gf_migrated','1');
+    toast('이 기기의 기존 데이터를 클라우드로 옮겼어요');
+  }catch(e){console.warn('migrate',e);}
+}
+
+// 로그인(연동 암호)
+const loginBtn=document.getElementById('loginBtn');
+const loginPw=document.getElementById('loginPw');
+async function doLogin(){
+  const pw=loginPw.value.trim();
+  if(!pw){document.getElementById('loginErr').textContent='연동 암호를 입력하세요';return;}
+  loginBtn.disabled=true;loginBtn.textContent='연결 중...';document.getElementById('loginErr').textContent='';
+  try{
+    await auth.signInWithEmailAndPassword(FIXED_EMAIL,pw);
+  }catch(err){
+    const c=err&&err.code||'';
+    let msg='암호가 맞지 않습니다. 다시 확인해주세요.';
+    if(c.indexOf('network')>=0)msg='인터넷 연결을 확인해주세요.';
+    if(c.indexOf('too-many')>=0)msg='시도가 많습니다. 잠시 후 다시 시도하세요.';
+    document.getElementById('loginErr').textContent=msg;
+  }
+  loginBtn.disabled=false;loginBtn.textContent='연결하기';
+}
+loginBtn.onclick=doLogin;
+loginPw.addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+
+document.getElementById('logoutBtn').onclick=async()=>{
+  if(!confirm('이 기기에서 연동을 해제할까요? 다시 쓰려면 연동 암호를 또 입력해야 합니다.'))return;
+  await auth.signOut();
+};
+
+// 로그인 상태에 따라 화면 전환
+auth.onAuthStateChanged(async user=>{
+  const ov=document.getElementById('loginOverlay');
+  if(user){
+    ov.classList.remove('show');
+    loginPw.value='';
+    await migrateIfNeeded();
+    startListeners();
+  }else{
+    stopListeners();
+    ov.classList.add('show');
+  }
+});
+
 function init(){
   inDate.value=todayStr();
-  buildPeriodBars();refreshVendorDatalist();renderAll();
-  inVendor.focus();
+  buildPeriodBars();
   if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 }
 init();

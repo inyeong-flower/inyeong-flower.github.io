@@ -1,5 +1,5 @@
 // 오프라인 캐시 (꽃시장 현장에서 인터넷이 약해도 동작)
-const CACHE = 'gf-maeip-v2';
+const CACHE = 'gf-maeip-v3';
 const ASSETS = [
   './',
   './index.html',
@@ -18,6 +18,8 @@ self.addEventListener('activate', e => {
 });
 self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
+  // 같은 출처(우리 앱 파일)만 캐시 처리 — Firebase 등 외부 요청은 그대로 통과
+  if (new URL(e.request.url).origin !== self.location.origin) return;
   e.respondWith(
     caches.match(e.request).then(hit => hit || fetch(e.request).then(res => {
       const copy = res.clone();
